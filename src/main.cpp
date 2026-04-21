@@ -1,11 +1,11 @@
 #include <atomic>
-#include <format>
-#include <iostream>
-#include <vector>
-#include <queue>
-#include <mutex>
-#include <functional>
 #include <condition_variable>
+#include <format>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <queue>
+#include <vector>
 
 #include "miniaudio.h"
 #include <windows.h>
@@ -29,38 +29,56 @@ void data_callback(ma_device* p_device, void* p_output, const void* p_input,
     const auto p_context = static_cast<RecordingContext*>(p_device->pUserData);
 
     if (!p_context->is_recording) {
-        return; /* Drop the audio and exit */
+        return; // Drop the audio and exit
     }
 
     const auto p_samples = static_cast<const int16_t*>(p_input);
     auto& buffer = p_context->audio_buffer;
-    /* Insert the frames into the vector */
+    // Insert the frames into vector in the recording context
     buffer.insert(buffer.end(), p_samples, p_samples + frame_count);
 }
+} // namespace
+
+int create_wav_file(const std::vector<int16_t>& audio_vector) {
+    ma_encoder_config encoder_config =
+        ma_encoder_config_init(ma_encoding_format_wav, ma_format_s16, 1, 16000);
+
+    ma_encoder encoder;
+
+    // Initialize the encoder, creates the file
+    if (ma_encoder_init_file("output.wav", &encoder_config, &encoder) != MA_SUCCESS) {
+        return -1;
+    }
+
+    if (ma_encoder_write_pcm_frames(&encoder, audio_vector.data(), audio_vector.size(), NULL) !=
+        MA_SUCCESS) {
+        return -1;    
+    }  
+
+    ma_encoder_uninit(&encoder);
+
+    return 0;
 }
 
 void process_audio_queue(QueueContext& q_context) {
-    /* The thread should consume audio vectors from the queue and process them.
-     * We implement a producer-consumer mechanism with the main thread.
-     */
     while (true) {
-        /* Flow:
-         * 1. Wait for waking up if there are jobs in the queue
-         * 2. Try to grab mutex
-         * 3. Extract buffer from queue
-         * 4. Release
-         */
-        {
-            std::unique_lock<std::mutex> lock(q_context.queue_mutex); /* Create the unique lock */
-            /* Conditional variable unlocks mutex, waits for signal to wake up and then locks mutex,
-             * checks that buffer is not empty If true, it will keep the lock and finish executing.
-             * Else, will return to sleep.
-             * Only then will it move on.
-             */
-            q_context.cv.wait(lock, [&q_context]() { return !q_context.buffer_queue.empty(); });
+        std::vector<int16_t> local_audio;
 
-            /* Move the audio buffer into the transcription thread, release mutex, and then begin processing */
-        }
+        {   // Wait on the conditional variable for signal from main thread
+            std::unique_lock<std::mutex> lock(q_context.queue_mutex); 
+            q_context.cv.wait(lock, [&q_context]() { return !q_context.buffer_queue.empty(); }); // Wake up and take lock
+
+            
+            local_audio = std::move(q_context.buffer_queue.front()); // Move the vector out of the queue into the local vector
+            q_context.buffer_queue.pop(); // Now delete the empty vector from the queue
+        } 
+
+        std::cout << "Processing " << local_audio.size() << " frames...\n";
+
+        // Create .WAV file
+        create_wav_file(local_audio);
+
+
     }
 }
 
@@ -68,7 +86,7 @@ int main() {
     QueueContext queue_context;
     RecordingContext recorder_context;
 
-    // Initialize the config
+    // Initialize the recorder device config
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
     config.capture.format = ma_format_s16;
     config.capture.channels = 1;
@@ -78,16 +96,19 @@ int main() {
 
     ma_device device;
     if (ma_device_init(nullptr, &config, &device) != MA_SUCCESS) {
-        return -1; // Failed to initialize the device    
+        return -1; // Failed to initialize the device
     }
 
-    ma_device_start(&device); /* Start the device */
+    ma_device_start(&device); // Start the device
 
-    std::thread transcription_thread(process_audio_queue, std::ref(queue_context)); /* Start the transcription thread */
+    std::thread transcription_thread(process_audio_queue,
+                                     std::ref(queue_context)); // Start the transcription thread
 
-    /* Hotkey Logic */
+    transcription_thread.detach(); // ADD FOR PROTOTYPING, ADD PROPER SHUTDOWN MECHANISM LATER!!!!!
+
+    // Hotkey Logic
     bool prev_state = false;
-    /* States: Not recording, Recording, Finished recording */
+    // States: Not recording, Recording, Finished recording
     while (true) {
 
         if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
@@ -101,15 +122,18 @@ int main() {
         if (is_pressing && !prev_state) {
             recorder_context.is_recording = true;
             std::cout << "Recording started...\n";
-        }
-        else if (!is_pressing && prev_state) {
+        } else if (!is_pressing && prev_state) {
             recorder_context.is_recording = false;
             std::cout << "Stopping recording...\n";
-            /* Grab mutex, transfer ownership of the vector the queue using move and unlock it. Then, notify the CV. */
+            // Grab mutex, transfer ownership of the vector the queue using move and unlock it.
+            // Then, notify the CV.
             {
-                std::unique_lock<std::mutex> lock(queue_context.queue_mutex); /* Grab the lock */
-                queue_context.buffer_queue.push();
-            }
+                std::unique_lock<std::mutex> lock(queue_context.queue_mutex); // Grab the lock
+                queue_context.buffer_queue.push(
+                    std::move(recorder_context.audio_buffer)); // Move the buffer into the queue and reset it
+            } // Lock will go out of scope and unlock
+
+            queue_context.cv.notify_one(); // Notify the consumer
         }
 
         prev_state = is_pressing;
