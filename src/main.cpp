@@ -76,9 +76,9 @@ void process_audio_queue(QueueContext& q_context) {
         std::cout << "Processing " << local_audio.size() << " frames...\n";
 
         // Create .WAV file
-        create_wav_file(local_audio);
-
-
+        if (create_wav_file(local_audio) != MA_SUCCESS) {
+            std::cout << "Failed to create .wav file.\n";
+        }
     }
 }
 
