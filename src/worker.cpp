@@ -12,6 +12,9 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include <miniaudio.h>
 
 
@@ -157,4 +160,19 @@ void process_audio_queue(QueueContext& q_context) {
 
         // Paste the text
     }
+}
+
+void paste_text(const std::string& text) {
+    HWND hwnd =
+        CreateWindowEx(0, "STATIC", "DummyWindow", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL); // Initialize hidden window
+
+    if (hwnd == NULL) {
+        std::cerr << "Failed to create invisible Windows window.\n";
+        return;
+    }
+
+    if (OpenClipboard(hwnd)) {
+        
+    }
+        
 }
