@@ -14,6 +14,7 @@
 
 #include <miniaudio.h>
 
+
 // WAV File Header according to https://en.wikipedia.org/wiki/WAV#WAV_file_header
 #pragma pack(push, 1)
 struct WavHeader {
@@ -73,7 +74,10 @@ int create_wav_file(const std::vector<int16_t>& audio_vector) {
 }
 
 void process_audio_queue(QueueContext& q_context) {
+    std::string model_name = "whisper-large-v3";
 
+    auto cli = std::make_unique<httplib::SSLClient>("api.groq.com");
+    cli->set_bearer_token_auth("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");
 
     while (true) {
         std::vector<int16_t> local_audio;
@@ -94,7 +98,7 @@ void process_audio_queue(QueueContext& q_context) {
 
         // Create .WAV file
 
-        // a. To the disk:
+        // a. In the disk:
         /*if (create_wav_file(local_audio) != MA_SUCCESS) {
             std::cout << "Failed to create .wav file.\n";
         }*/
@@ -103,23 +107,53 @@ void process_audio_queue(QueueContext& q_context) {
         WavHeader header;
         uint32_t data_byte_size = sizeof(uint16_t) * local_audio.size();
 
-        header.data_size = data_byte_size;
-        header.file_size = data_byte_size + sizeof(WavHeader) - 8;
+        header.data_size = data_byte_size; // Size of the data portion of the file
+        header.file_size =
+            data_byte_size + sizeof(WavHeader) - 8; // Size of the whole file according to standard
 
+        // Creating the full .WAV file in memory (header + local_audio data portion)
         std::string memory_file;
         memory_file.resize(sizeof(WavHeader) + data_byte_size);
 
         std::memcpy(memory_file.data(), &header, sizeof(WavHeader)); // Copy the header
         std::memcpy(memory_file.data() + sizeof(WavHeader), local_audio.data(), data_byte_size);
 
-        // For testing that it was successful
-        //save_memory_to_disk(memory_file, "test.wav");
-        
-        
+        // For testing: Saving the 'in-memory' file to disk to validate correct behavior
+        // save_memory_to_disk(memory_file, "test.wav");
 
-        // Send API request
+        // Create the multipart form data
+        httplib::UploadFormDataItems items = {{"file", memory_file, "audio.wav", "audio/wav"},
+                                              {"model", model_name, "", ""},
+                                              {"response_format", "text", "", ""}};
+        // Send the request
+        auto res = cli->Post("/openai/v1/audio/transcriptions", items);
 
-        // Parse API request
+        if (!res) {
+            auto err = res.error();
+            std::cerr << "Error: " << httplib::to_string(err) << "\n";
+            if (err == httplib::Error::SSLConnection) {
+                std::cerr << "SSL error code: " << res.ssl_error() << "\n";
+                std::cerr << "Backend error: " << res.ssl_backend_error() << "\n";
+            }
+            continue;
+        }
+
+        switch (res->status) {
+        case httplib::StatusCode::OK_200:
+            std::cout << "SUCCESS!\n";
+            std::cout << "Status code:\n";
+            std::cout << res->status << "\n";
+            std::cout << "Response body:\n";
+            std::cout << res->body << "\n";
+            break;
+
+        default:
+            std::cout << "Status code:\n";
+            std::cout << res->status << "\n";
+            std::cout << "Response body:\n";
+            std::cout << res->body << "\n";
+            break;
+        }
 
         // Paste the text
     }
