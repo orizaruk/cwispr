@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include <device_utils.h>
+#include "device_utils.h"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
@@ -16,7 +16,6 @@
 #include <windows.h>
 
 #include <miniaudio.h>
-
 
 // WAV File Header according to https://en.wikipedia.org/wiki/WAV#WAV_file_header
 #pragma pack(push, 1)
@@ -41,6 +40,28 @@ struct WavHeader {
     uint32_t data_size;                     // DataSize
 };
 #pragma pack(pop)
+
+// This function converts a UTF-8 std::string to UTF-16 std::wstring, which is the required format
+// for the Windows clipboard.
+std::wstring ConvertToUTF16(const std::string& input_string) {
+    if (input_string.empty())
+        return std::wstring();
+
+    int required_size = MultiByteToWideChar(CP_UTF8, 0, input_string.c_str(), -1, NULL, 0);
+
+    if (required_size == 0) {
+        std::cerr << "Conversion failed.\n";
+        return std::wstring();
+    }
+
+    std::wstring output_string(required_size, 0); // Allocate the buffer for the converted string
+
+    // Perform the conversion
+    MultiByteToWideChar(CP_UTF8, 0, input_string.c_str(), -1, &output_string[0], required_size);
+    output_string.pop_back();
+
+    return output_string;
+}
 
 void save_memory_to_disk(const std::string& memory_bucket, const std::string& fileName) {
     std::ofstream out_file(fileName, std::ios::binary);
@@ -74,6 +95,180 @@ int create_wav_file(const std::vector<int16_t>& audio_vector) {
     ma_encoder_uninit(&encoder);
 
     return 0;
+}
+
+void paste_text(const std::string& text) {
+    HWND hwnd = CreateWindowEx(0, "STATIC", "DummyWindow", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL,
+                               NULL); // Initialize hidden window
+
+    if (hwnd == NULL) {
+        std::cerr << "Failed to create invisible Windows window.\n";
+        return;
+    }
+
+    // 1. Copy contents of clipboard if it's text, mark the flag as true to know to restore it at
+    // the end
+    std::wstring saved_clipboard_text;
+    bool saved_clipboard_flag = false;
+
+    if (OpenClipboard(hwnd)) {
+        if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+            HANDLE hClipboardData = GetClipboardData(CF_UNICODETEXT);
+            if (hClipboardData != nullptr) {
+                auto pClipboardData = static_cast<wchar_t*>(GlobalLock(hClipboardData));
+                if (pClipboardData != nullptr) {
+                    saved_clipboard_text = pClipboardData;
+                    GlobalUnlock(hClipboardData); // unlock memory after finish using
+                    saved_clipboard_flag = true;
+                }
+            }
+        }
+        CloseClipboard();
+    }
+
+    // 2. Set clipboard contents to transcribed text
+    bool clipboard_ready_to_paste = false;
+
+    std::wstring transcription_text = ConvertToUTF16(text); // Convert from UTF-8 to UTF-16
+    if (OpenClipboard(hwnd)) {
+        // Take ownership of the clipboard, required for SetClipboardData
+        if (EmptyClipboard() == 0) {
+            CloseClipboard();
+            return;
+        }
+
+        // Create the Handle that will hold the string to paste
+        size_t bytes_needed_for_clipboard = (transcription_text.size() + 1) * sizeof(wchar_t);
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes_needed_for_clipboard);
+
+        if (hMem == nullptr) {
+            std::cerr << "Allocation by GlobalAlloc failed.\n";
+            CloseClipboard();
+            return; // Allocation failed
+        }
+
+        // Lock the handle
+        void* pMem = GlobalLock(hMem);
+
+        if (pMem == nullptr) {
+            GlobalFree(hMem);
+            std::cerr << "Failed to lock the handle for pasting the string contents.\n";
+            CloseClipboard();
+            return;
+        }
+
+        // Write the string to the handle
+        memcpy(pMem, transcription_text.c_str(), bytes_needed_for_clipboard);
+
+        // Unlock the handle, we finished
+        GlobalUnlock(hMem);
+
+        // Replace the clipboard contents with the text
+        if (SetClipboardData(CF_UNICODETEXT, hMem) == nullptr) {
+            // Windows failed with modifying clipboard content, we need to free the handle since we
+            // are still owners of it
+            GlobalFree(hMem);
+            std::cerr << "Windows failed to modify the clipboard contents.\n";
+        }
+
+        clipboard_ready_to_paste = true;
+        CloseClipboard();
+    }
+
+    // 3. Simulate Ctrl+V in order to paste clipboard contents
+    if (clipboard_ready_to_paste) {
+        // Construct the inputs array, we release Ctrl+WIN in case they are pressed and then
+        // simulate Ctrl+V and release
+        INPUT inputs[6] = {};
+
+        // Release CTRL
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].ki.wVk = VK_CONTROL;
+        inputs[0].ki.dwFlags = KEYEVENTF_KEYUP;
+
+        // Release WIN key
+        inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].ki.wVk = VK_LWIN;
+        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+
+        // Press CTRL
+        inputs[2].type = INPUT_KEYBOARD;
+        inputs[2].ki.wVk = VK_CONTROL;
+
+        // Press V
+        inputs[3].type = INPUT_KEYBOARD;
+        inputs[3].ki.wVk = 'V';
+
+        // Release V
+        inputs[4].type = INPUT_KEYBOARD;
+        inputs[4].ki.wVk = 'V';
+        inputs[4].ki.dwFlags = KEYEVENTF_KEYUP;
+
+        // Release CTRL
+        inputs[5].type = INPUT_KEYBOARD;
+        inputs[5].ki.wVk = VK_CONTROL;
+        inputs[5].ki.dwFlags = KEYEVENTF_KEYUP;
+
+        UINT uSent = SendInput(ARRAYSIZE(inputs), inputs, sizeof(INPUT));
+        if (uSent != ARRAYSIZE(inputs)) {
+            std::cerr << "Failed to send all the inputs.\n";
+        }
+
+        Sleep(50); // Added sleep to allow the application to process the keyboard inputs before we
+                   // modify clipboard contents
+    }
+
+    // 4. Restore clipboard contents to previous state
+    if (saved_clipboard_flag) {
+        // saved_clipboard_text wstring
+        if (OpenClipboard(hwnd)) {
+            // Take ownership of the clipboard, required for SetClipboardData
+            if (EmptyClipboard() == 0) {
+                CloseClipboard();
+                return;
+            }
+
+            // Create the Handle that will hold the string to paste
+            size_t bytes_needed_for_clipboard =
+                (saved_clipboard_text.size() + 1) * sizeof(wchar_t); // add 1 for null terminator
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes_needed_for_clipboard);
+
+            if (hMem == nullptr) {
+                std::cerr << "Allocation by GlobalAlloc failed.\n";
+                CloseClipboard();
+                return; // Allocation failed
+            }
+
+            // Lock the handle
+            void* pMem = GlobalLock(hMem);
+
+            if (pMem == nullptr) {
+                GlobalFree(hMem);
+                std::cerr << "Failed to lock the handle for pasting the old string contents.\n";
+                CloseClipboard();
+                return;
+            }
+
+            // Write the string to the handle
+            memcpy(pMem, saved_clipboard_text.c_str(), bytes_needed_for_clipboard);
+
+            // Unlock the handle, we finished
+            GlobalUnlock(hMem);
+
+            // Replace the clipboard contents with the text
+            if (SetClipboardData(CF_UNICODETEXT, hMem) == nullptr) {
+                // Windows failed with modifying clipboard content, we need to free the handle since
+                // we are still owners of it
+                GlobalFree(hMem);
+                std::cerr << "Windows failed to modify the clipboard contents.\n";
+            }
+
+            CloseClipboard();
+        }
+    }
+
+    // 5. Destroy the window created for the Handle to avoid leak
+    DestroyWindow(hwnd);
 }
 
 void process_audio_queue(QueueContext& q_context) {
@@ -121,7 +316,7 @@ void process_audio_queue(QueueContext& q_context) {
         std::memcpy(memory_file.data(), &header, sizeof(WavHeader)); // Copy the header
         std::memcpy(memory_file.data() + sizeof(WavHeader), local_audio.data(), data_byte_size);
 
-        // For testing: Saving the 'in-memory' file to disk to validate correct behavior
+        // For testing: Saving the 'in-memory' file to disk to validate file created correctly
         // save_memory_to_disk(memory_file, "test.wav");
 
         // Create the multipart form data
@@ -143,11 +338,7 @@ void process_audio_queue(QueueContext& q_context) {
 
         switch (res->status) {
         case httplib::StatusCode::OK_200:
-            std::cout << "SUCCESS!\n";
-            std::cout << "Status code:\n";
-            std::cout << res->status << "\n";
-            std::cout << "Response body:\n";
-            std::cout << res->body << "\n";
+            paste_text(res->body);
             break;
 
         default:
@@ -157,116 +348,5 @@ void process_audio_queue(QueueContext& q_context) {
             std::cout << res->body << "\n";
             break;
         }
-
-        // Paste the text
     }
-}
-
-// This function converts a UTF-8 std::string to UTF-16 std::wstring, which is the required format for the Windows clipboard.
-std::wstring ConvertToUTF16(const std::string& input_string) {
-    if (input_string.empty())
-        return std::wstring();
-
-    int required_size = MultiByteToWideChar(CP_UTF8, 0, input_string.c_str(), -1, NULL, 0);
-
-    if (required_size == 0) {
-        std::cerr << "Conversion failed.\n";
-        return std::wstring();
-    }
-    
-    std::wstring output_string(required_size, 0); // Allocate the buffer for the converted string
-    
-    // Perform the conversion
-    MultiByteToWideChar(CP_UTF8, 0, input_string.c_str(), -1, &output_string[0], required_size);
-    output_string.pop_back();
-
-    return output_string;
-}
-
-
-void paste_text(const std::string& text) {
-    HWND hwnd =
-        CreateWindowEx(0, "STATIC", "DummyWindow", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL); // Initialize hidden window
-
-    if (hwnd == NULL) {
-        std::cerr << "Failed to create invisible Windows window.\n";
-        return;
-    }
-
-    // 1. Copy contents of clipboard if it's text
-    std::wstring saved_clipboard_text;
-    bool saved_clipboard_flag = false;
-
-    if (OpenClipboard(hwnd)) {
-        if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
-            HANDLE hClipboardData = GetClipboardData(CF_UNICODETEXT);
-            if (hClipboardData != nullptr) {
-                auto pClipboardData = static_cast<wchar_t*>(GlobalLock(hClipboardData));
-                if (pClipboardData != nullptr) {
-                    saved_clipboard_text = pClipboardData;
-                    GlobalUnlock(hClipboardData); // unlock memory after finish using
-                    saved_clipboard_flag = true;
-                }
-            }
-        }
-        CloseClipboard();
-    }
-
-    // 2. Set clipboard contents to transcribed text
-    bool clipboard_ready_to_paste = false;
-
-    if (saved_clipboard_flag) {
-        std::wstring transcription_text = ConvertToUTF16(text); // Convert from UTF-8 to UTF-16
-        if (OpenClipboard(hwnd)) {
-            // Take ownership of the clipboard, required for SetClipboardData
-            if (EmptyClipboard() == 0) {
-                CloseClipboard();
-                return;
-            }
-
-            // Create the Handle that will hold the string to paste
-            size_t bytes_needed_for_clipboard = (transcription_text.size() + 1) * sizeof(wchar_t);
-            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes_needed_for_clipboard);
-            
-            if (hMem == nullptr) {
-                std::cerr << "Allocation by GlobalAlloc failed.\n";
-                CloseClipboard();
-                return; // Allocation failed
-            }
-            
-            // Lock the handle 
-            void* pMem = GlobalLock(hMem);
-
-            if (pMem == nullptr) {
-                GlobalFree(hMem); 
-                std::cerr << "Failed to lock the handle for pasting the string contents.\n";
-                CloseClipboard();
-                return;
-            }
-            
-            // Write the string to the handle
-            memcpy(pMem, transcription_text.c_str(), bytes_needed_for_clipboard);
-        
-            // Unlock the handle, we finished
-            GlobalUnlock(hMem);
-
-            // Replace the clipboard contents with the text
-            if (SetClipboardData(CF_UNICODETEXT, hMem) == nullptr) {
-                // Windows failed with modifying clipboard content, we need to free the handle since we are still owners of it
-                GlobalFree(hMem);
-                std::cerr << "Windows failed to modify the clipboard contents.\n";
-            }
-
-            clipboard_ready_to_paste = true;
-            CloseClipboard();
-        }
-    }
-    
-    // 3. Simulate Ctrl+V in order to paste clipboard contents
-    if (clipboard_ready_to_paste) {
-        INPUT inputs[4] = {};
-
-        inputs[0].type = INPUT_KEYBOARD;
-    }
-
 }

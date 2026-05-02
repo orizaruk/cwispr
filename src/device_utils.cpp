@@ -1,7 +1,9 @@
 #include "device_utils.h"
-#include "miniaudio.h"
+
 #include <iostream>
 #include <format>
+
+#include "miniaudio.h"
 
 int print_audio_devices()
 {
