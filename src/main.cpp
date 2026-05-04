@@ -57,8 +57,6 @@ int main() {
     std::thread transcription_thread(process_audio_queue,
                                      std::ref(queue_context)); // Start the transcription thread
 
-    transcription_thread.detach(); // ADD FOR PROTOTYPING, ADD PROPER SHUTDOWN MECHANISM LATER!!!!!
-
     // Hotkey Logic
     bool prev_state = false;
     // States: Not recording, Recording, Finished recording
@@ -69,7 +67,12 @@ int main() {
     while (true) {
 
         if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
-            std::cout << "Breaking the loop...\n";
+            std::cout << "Initiating shutdown...\n";
+            {
+                std::lock_guard<std::mutex> lock(queue_context.queue_mutex);
+                queue_context.need_to_exit = true; // Modify flag for worker thread to close
+            }
+            queue_context.cv.notify_all();
             break;
         }
 
@@ -99,5 +102,12 @@ int main() {
     }
 
     ma_device_uninit(&device);
+
+    std::cout << "Waiting for background thread to finish...\n";
+    if (transcription_thread.joinable()) {
+        transcription_thread.join();
+    }
+    
+    std::cout << "Finished shutdown process.\n";
     return 0;
 }

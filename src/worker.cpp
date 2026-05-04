@@ -284,9 +284,15 @@ void process_audio_queue(QueueContext& q_context) {
             // Wait on the conditional variable for signal from main thread
             std::unique_lock<std::mutex> lock(q_context.queue_mutex);
             q_context.cv.wait(lock, [&q_context]() {
-                return !q_context.buffer_queue.empty();
+                return !q_context.buffer_queue.empty() || q_context.need_to_exit;
             }); // Wake up and take lock
 
+            // If queue is empty and need to quit, shut down thread
+            if (q_context.need_to_exit && q_context.buffer_queue.empty()) {
+                return;
+            }
+
+            // Otherwise, process the buffer until it is empty
             local_audio = std::move(q_context.buffer_queue.front());
             // Move the vector out of the queue into the local vector
             q_context.buffer_queue.pop(); // Now delete the empty vector from the queue
