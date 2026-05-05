@@ -275,7 +275,7 @@ void process_audio_queue(QueueContext& q_context) {
     std::string model_name = "whisper-large-v3";
 
     auto cli = std::make_unique<httplib::SSLClient>("api.groq.com");
-    cli->set_bearer_token_auth("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");
+    cli->set_bearer_token_auth("API_KEY_GOES_HERE");
 
     while (true) {
         std::vector<int16_t> local_audio;
