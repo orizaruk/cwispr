@@ -1,6 +1,5 @@
 #include <atomic>
 #include <condition_variable>
-#include <format>
 #include <functional>
 #include <iostream>
 #include <mutex>
@@ -60,7 +59,7 @@ int main() {
     // Hotkey Logic
     bool prev_state = false;
     // States: Not recording, Recording, Finished recording
-    
+
     std::cout << "Hardware initialized. Press Left Ctrl + Left Win to record. Press Escape to "
                  "quit.\n";
 
@@ -107,7 +106,7 @@ int main() {
     if (transcription_thread.joinable()) {
         transcription_thread.join();
     }
-    
+
     std::cout << "Finished shutdown process.\n";
     return 0;
 }

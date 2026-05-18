@@ -9,8 +9,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Define the executable (the name of the app and the files it needs)
-add_executable(cwispr "src/main.cpp" "src/miniaudio.cpp" "src/device_utils.cpp"  "src/worker.cpp"   "src/main (2).cpp")
+add_executable(cwispr "src/main.cpp" "src/miniaudio.cpp" "src/device_utils.cpp"  "src/worker.cpp" "src/logger.cpp" "include/logger.h")
 
 target_include_directories(cwispr PRIVATE include extern)
+target_compile_definitions(cwispr PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
 
 target_link_libraries(cwispr PRIVATE OpenSSL::SSL OpenSSL::Crypto)

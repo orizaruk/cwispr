@@ -9,7 +9,6 @@
 
 #include "device_utils.h"
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
 
 #define WIN32_LEAN_AND_MEAN
