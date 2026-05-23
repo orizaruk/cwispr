@@ -2,5 +2,10 @@ BasedOnStyle: LLVM
 ColumnLimit: 100
 AllowShortFunctionsOnASingleLine: None
 PointerAlignment: Left
-IndentWidth: 4
 AlignTrailingComments: true
+
+# The exact rules to force 2 spaces everywhere
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ContinuationIndentWidth: 2
