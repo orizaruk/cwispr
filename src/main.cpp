@@ -33,6 +33,8 @@ void data_callback(ma_device* p_device, void* p_output, const void* p_input,
 } // namespace
 
 int main() {
+  const uint32_t MINIMUM_RECORDING_LENGTH_TO_BE_PROCESSED = 1.5;
+
   // Create Logger object and make the global Logger pointer point to it. 
   Logger logger;
   GlobalLog = &logger;
@@ -55,6 +57,10 @@ int main() {
     logger.error("main", "Failed to init recording device.");
     return -1;
   }
+
+  // Log the device name
+  std::string recording_device_name = getCaptureDeviceName(device);
+  logger.info("main", std::format("Initialized recording device: {}", recording_device_name));
 
   // Start the device
   if (ma_device_start(&device) != MA_SUCCESS) {
@@ -98,15 +104,21 @@ int main() {
       // Grab mutex, transfer ownership of the vector the queue using move and unlock it.
       // Then, notify the CV.
       auto num_frames = recorder_context.audio_buffer.size();
-      {
-        std::unique_lock<std::mutex> lock(queue_context.queue_mutex); // Grab the lock
-        queue_context.buffer_queue.push(
-          std::move(recorder_context.audio_buffer)); // Move the buffer into the queue and reset it
-      } // Lock will go out of scope and unlock
-      queue_context.cv.notify_one(); // Notify the consumer
-      logger.info("main", std::format("Moved audio buffer containing {} frames to the queue to be "
-                                      "proceesed by background thread.",
-                                      num_frames));
+      auto duration_secs = num_frames / device.sampleRate;
+      
+      // Check for minimum duration and discard mis-recordings
+      if (duration_secs >= MINIMUM_RECORDING_LENGTH_TO_BE_PROCESSED) {
+        {
+          std::unique_lock<std::mutex> lock(queue_context.queue_mutex); // Grab the lock
+          queue_context.buffer_queue.push(std::move(
+            recorder_context.audio_buffer)); // Move the buffer into the queue and reset it
+        } // Lock will go out of scope and unlock
+        queue_context.cv.notify_one(); // Notify the consumer
+        logger.info("main",
+                    std::format("Moved audio buffer containing {} frames to the queue to be "
+                                "proceesed by background thread.",
+                                num_frames));
+      }
     }
 
     // Save current state into 'prev iteration state', sleep and move to the next iteration

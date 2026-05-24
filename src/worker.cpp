@@ -42,28 +42,6 @@ struct WavHeader {
 };
 #pragma pack(pop)
 
-// This function converts a UTF-8 std::string to UTF-16 std::wstring, which is the required format
-// for the Windows clipboard.
-std::wstring ConvertToUTF16(const std::string& input_string) {
-  if (input_string.empty())
-    return std::wstring();
-
-  int required_size = MultiByteToWideChar(CP_UTF8, 0, input_string.c_str(), -1, NULL, 0);
-
-  if (required_size == 0) {
-    GlobalLog->error("worker", "Failed to convert string to UTF16.");
-    return std::wstring();
-  }
-
-  std::wstring output_string(required_size, 0); // Allocate the buffer for the converted string
-
-  // Perform the conversion
-  MultiByteToWideChar(CP_UTF8, 0, input_string.c_str(), -1, &output_string[0], required_size);
-  output_string.pop_back();
-
-  return output_string;
-}
-
 void save_memory_to_disk(const std::string& memory_bucket, const std::string& fileName) {
   std::ofstream out_file(fileName, std::ios::binary);
 
@@ -289,11 +267,11 @@ void paste_text(const std::string& text_to_paste) {
 }
 
 void process_audio_queue(QueueContext& q_context) {
-  std::cout << "Background thread launched.\n";
+  GlobalLog->info("worker", "Worker launched, waiting for audio.");
   std::string model_name = "whisper-large-v3";
 
   auto cli = std::make_unique<httplib::SSLClient>("api.groq.com");
-  cli->set_bearer_token_auth("API_KEY_GOES_HERE");
+  cli->set_bearer_token_auth(ConvertWideToUtf8(getEnvVariable(L"GROQ_API_KEY")));
 
   while (true) {
     std::vector<int16_t> local_audio;

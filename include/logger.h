@@ -117,9 +117,7 @@ private:
     {
       std::lock_guard<std::mutex> lock(mutex_); // lock for writing to the file
       file_ << log_message;
-      if (level == LogLevel::Error) {
-        file_.flush();
-      }
+      file_.flush();
     }
   }
 };
