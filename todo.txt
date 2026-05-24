@@ -1,3 +1,10 @@
-2. Get rid of hard-coded API key and move to environment variable
-3. Implement tray icon functionality
-4. Save transcriptions in file and build functionality that will enable access to it
+1. Move the app from the current console/hotkey polling loop into a proper Windows tray app:
+   - hidden window + message loop
+   - tray icon with basic menu actions
+
+2. Clean up synchronization around the miniaudio data callback and the recording buffer.
+   Right now the callback appends to the audio buffer while the main thread can read/move it.
+
+3. Save transcriptions to a local history file and add a simple way to access them later.
+
+5. Eventually make the transcription model configurable instead of changing it in worker.cpp.
