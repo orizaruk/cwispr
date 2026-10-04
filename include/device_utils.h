@@ -1,4 +1,6 @@
 #pragma once
+#include <atomic>
+#include <condition_variable>
 #include <vector>
 #include <queue>
 #include <mutex>
@@ -8,6 +10,9 @@
 
 struct RecordingContext {
     std::vector<int16_t> audio_buffer;
+    // Guards audio_buffer: the miniaudio callback appends to it on the audio thread while the
+    // UI thread clears it / moves it out.
+    std::mutex buffer_mutex;
     std::atomic<bool> is_recording{false};
 };
 

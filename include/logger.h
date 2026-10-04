@@ -73,6 +73,7 @@ inline std::string current_timestamp() {
 class Logger {
   std::ofstream file_;
   std::mutex mutex_;
+  fs::path path_;
 
 public:
   Logger() {
@@ -90,6 +91,11 @@ public:
     if (!file_.is_open()) {
       throw std::runtime_error("Failed to open log file.");
     }
+    path_ = full_path;
+  }
+
+  const fs::path& path() const {
+    return path_;
   }
 
   void debug(std::string_view component, std::string_view message) {

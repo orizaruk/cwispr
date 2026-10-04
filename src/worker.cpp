@@ -46,7 +46,7 @@ void save_memory_to_disk(const std::string& memory_bucket, const std::string& fi
   std::ofstream out_file(fileName, std::ios::binary);
 
   if (!out_file) {
-    std::cerr << "Failed to open file for writing.\n";
+    GlobalLog->error("worker", "Failed to open file for writing.");
     return;
   }
 
@@ -176,7 +176,7 @@ bool modify_clipboard(HWND hwnd, std::wstring& in_text) {
   return true;
 }
 
-void simulate_paste_keypress() {
+bool simulate_paste_keypress() {
   // Construct the inputs array, we release Ctrl+WIN in case they are pressed and then
   // simulate Ctrl+V and release
   INPUT inputs[6] = {};
@@ -212,13 +212,17 @@ void simulate_paste_keypress() {
   UINT uSent = SendInput(ARRAYSIZE(inputs), inputs, sizeof(INPUT));
   if (uSent != ARRAYSIZE(inputs)) {
     GlobalLog->error("simulate_paste_keypress", "Failed to send all the inputs.");
+    return false;
   }
+  return true;
 }
 
-void paste_text(const std::string& text_to_paste) {
+// Returns true if the Ctrl+V sequence was sent. That does not guarantee the target application
+// accepted the text, which is why every transcription is also written to the transcript log.
+bool paste_text(const std::string& text_to_paste) {
   if (text_to_paste.empty()) {
     GlobalLog->warn("paste_text", "Empty string fed into paste_text function.");
-    return;
+    return false;
   }
 
   GlobalLog->info("paste_text", "Starting text pasting sequence.");
@@ -227,7 +231,7 @@ void paste_text(const std::string& text_to_paste) {
 
   if (hwnd == NULL) {
     GlobalLog->error("paste_text", "Failed to create invisible Windows window.");
-    return;
+    return false;
   }
 
   // 1. Copy contents of clipboard if it's text, mark the flag as true to know to restore it at
@@ -240,18 +244,23 @@ void paste_text(const std::string& text_to_paste) {
   if (transcription_text.empty()) {
     DestroyWindow(hwnd);
     GlobalLog->error("paste_text", "UTF8 to UTF16 conversion failed.");
-    return;
+    return false;
   }
 
   // 2. Modify clipboard contents to the transcription text
   if (!modify_clipboard(hwnd, transcription_text)) {
     DestroyWindow(hwnd);
     GlobalLog->error("paste_text", "Failed to modify contents of clipboard.");
-    return;
+    return false;
   }
 
   // 3. Simulate Ctrl+V in order to paste clipboard contents
-  simulate_paste_keypress();
+  if (!simulate_paste_keypress()) {
+    // Leave the transcription on the clipboard so the user can paste it manually.
+    DestroyWindow(hwnd);
+    GlobalLog->warn("paste_text", "Paste keypress failed, leaving transcription on the clipboard.");
+    return false;
+  }
   Sleep(50); // Added sleep to allow the application to process the keyboard inputs before we modify
              // clipboard contents
 
@@ -264,9 +273,10 @@ void paste_text(const std::string& text_to_paste) {
 
   // 5. Destroy the window created for the Handle to avoid leak
   DestroyWindow(hwnd);
+  return true;
 }
 
-void process_audio_queue(QueueContext& q_context) {
+void process_audio_queue(QueueContext& q_context, TranscriptLog& transcripts, WorkerNotify notify) {
   GlobalLog->info("worker", "Worker launched, waiting for audio.");
   std::string model_name = "whisper-large-v3";
 
@@ -293,9 +303,14 @@ void process_audio_queue(QueueContext& q_context) {
       // Move the vector out of the queue into the local vector
       q_context.buffer_queue.pop(); // Now delete the empty vector from the queue
     }
-    
+
     GlobalLog->info(
       "worker", std::format("Processing audio buffer containing {} frames.", local_audio.size()));
+
+    TranscriptEntry entry;
+    entry.model = model_name;
+    entry.audio_seconds = static_cast<double>(local_audio.size()) / 16000.0;
+
     // Create .WAV file
 
     // a. In the disk:
@@ -336,23 +351,40 @@ void process_audio_queue(QueueContext& q_context) {
     if (!res) {
       auto err = res.error();
       GlobalLog->error("worker", httplib::to_string(err));
+      entry.status = TranscriptStatus::RequestFailed;
+      entry.error = httplib::to_string(err);
       if (err == httplib::Error::SSLConnection) {
         GlobalLog->error("worker", std::format("SSL error code: {}", res.ssl_error()));
         GlobalLog->error("worker", std::format("Backend error: {}", res.ssl_backend_error()));
       }
-      continue;
-    }
-
-    switch (res->status) {
-    case httplib::StatusCode::OK_200:
-      GlobalLog->info("worker", "Request returned code 200, calling paste_text function.");
-      paste_text(res->body);
-      break;
-
-    default:
+    } else if (res->status != httplib::StatusCode::OK_200) {
       GlobalLog->info("worker", std::format("Request returned code {}, response body: {}",
                                             res->status, res->body));
-      break;
+      entry.status = TranscriptStatus::ApiError;
+      entry.error = std::format("HTTP {}: {}", res->status, res->body);
+    } else if (res->body.find_first_not_of(" \t\r\n") == std::string::npos) {
+      GlobalLog->warn("worker", "Request returned code 200 with an empty transcription.");
+      entry.status = TranscriptStatus::Empty;
+    } else {
+      GlobalLog->info("worker", "Request returned code 200, calling paste_text function.");
+      entry.text = res->body;
+      entry.status =
+        paste_text(res->body) ? TranscriptStatus::Pasted : TranscriptStatus::PasteFailed;
+    }
+
+    // Keep the audio of failed requests so the recording is not lost.
+    if (entry.status == TranscriptStatus::RequestFailed ||
+        entry.status == TranscriptStatus::ApiError) {
+      const auto audio_path = transcripts.save_audio(memory_file);
+      if (!audio_path.empty()) {
+        entry.audio_file = ConvertWideToUtf8(audio_path.wstring());
+        GlobalLog->info("worker", std::format("Saved failed recording to {}.", entry.audio_file));
+      }
+    }
+
+    transcripts.append(entry);
+    if (notify) {
+      notify(entry.status);
     }
   }
 }
