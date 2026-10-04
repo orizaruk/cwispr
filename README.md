@@ -41,7 +41,7 @@ Only one instance can run at a time.
 
 The app uses the default capture device selected by Windows.
 
-The hotkey is detected with a low-level keyboard hook. Like the paste itself, it does not work while an elevated (administrator) window has focus, unless cwispr is also run as administrator.
+The hotkey press is detected with Raw Input (`WM_INPUT` messages), which only observes the keyboard and never delays it; the release is detected by polling the key state while recording. Like the paste itself, the hotkey may not work while an elevated (administrator) window has focus, unless cwispr is also run as administrator.
 
 ## Requirements
 
@@ -144,7 +144,7 @@ The directory is created automatically when the logger starts.
 
 ## Project layout
 
-- `src/main.cpp` - `WinMain`, hidden window and message loop, keyboard hook, recording state, tray menu, shutdown.
+- `src/main.cpp` - `WinMain`, hidden window and message loop, raw keyboard input, recording state, tray menu, shutdown.
 - `src/tray_icon.cpp` - notification-area icon, generated state icons, notifications.
 - `src/worker.cpp` - worker thread, WAV payload construction, Groq request, text injection.
 - `src/transcript_log.cpp` - transcript history files and saved audio of failed requests.

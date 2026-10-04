@@ -24,8 +24,7 @@
 namespace {
 // Messages sent to the hidden window.
 constexpr UINT WM_APP_TRAY = WM_APP + 1;            // Mouse events on the tray icon
-constexpr UINT WM_APP_HOTKEY_PRESSED = WM_APP + 2;  // Posted by the keyboard hook
-constexpr UINT WM_APP_TRANSCRIPT_DONE = WM_APP + 3; // Posted by the worker, wParam = status
+constexpr UINT WM_APP_TRANSCRIPT_DONE = WM_APP + 2; // Posted by the worker, wParam = status
 
 constexpr UINT_PTR TIMER_ID_RELEASE_POLL = 1;
 constexpr UINT RELEASE_POLL_INTERVAL_MS = 20;
@@ -40,11 +39,10 @@ enum MenuId : UINT {
 };
 
 // --- GLOBAL APPLICATION STATE
-// Only touched from the UI thread, except where noted. The keyboard hook and window procedure
-// have no user-data parameter, so the state lives here.
+// Only touched from the UI thread, except where noted. The window procedure has no user-data
+// parameter, so the state lives here.
 struct App {
   HWND hwnd = nullptr;
-  HHOOK keyboard_hook = nullptr;
   UINT taskbar_created_msg = 0;
   ma_device device;
   RecordingContext recorder; // Shared with the miniaudio callback thread
@@ -82,25 +80,6 @@ bool is_hotkey_held() {
   return is_key_down(VK_LCONTROL) && is_key_down(VK_LWIN);
 }
 
-// Low-level keyboard hook, runs on the UI thread (through its message loop) for every key event
-// in the session. It must return quickly, so it only posts a message to the window.
-// RegisterHotKey cannot be used because it does not support a modifier-only combination.
-LRESULT CALLBACK keyboard_hook_proc(int code, WPARAM w_param, LPARAM l_param) {
-  if (code == HC_ACTION && (w_param == WM_KEYDOWN || w_param == WM_SYSKEYDOWN)) {
-    const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(l_param);
-    // Ignore synthetic input, including the Ctrl+V the worker sends when pasting.
-    if ((key->flags & LLKHF_INJECTED) == 0) {
-      // The async state of the key in this event is not updated yet, so only check the other one.
-      const bool hotkey_pressed = (key->vkCode == VK_LCONTROL && is_key_down(VK_LWIN)) ||
-                                  (key->vkCode == VK_LWIN && is_key_down(VK_LCONTROL));
-      if (hotkey_pressed) {
-        PostMessageW(g_app.hwnd, WM_APP_HOTKEY_PRESSED, 0, 0);
-      }
-    }
-  }
-  return CallNextHookEx(nullptr, code, w_param, l_param);
-}
-
 void update_tray_state() {
   if (!g_app.tray) {
     return;
@@ -116,7 +95,7 @@ void update_tray_state() {
 
 void start_recording() {
   if (g_app.recorder.is_recording) {
-    return; // Key auto-repeat keeps posting the hotkey message while it is held
+    return; // Key auto-repeat keeps sending key-downs while the hotkey is held
   }
 
   {
@@ -124,8 +103,8 @@ void start_recording() {
     g_app.recorder.audio_buffer.clear();
     g_app.recorder.is_recording = true;
   }
-  // Poll for the release instead of waiting for the key-up in the hook: the hook does not see
-  // key events while an elevated window has focus, and a missed key-up would keep recording.
+  // Poll for the release instead of waiting for a key-up WM_INPUT: if focus moves to an elevated
+  // window the key-up may never reach us, and a missed key-up would keep recording.
   SetTimer(g_app.hwnd, TIMER_ID_RELEASE_POLL, RELEASE_POLL_INTERVAL_MS, nullptr);
   GlobalLog->info("main", "Starting recording.");
   update_tray_state();
@@ -234,6 +213,64 @@ void show_tray_menu(HWND hwnd) {
   DestroyMenu(menu);
 }
 
+// Asks Windows to post a WM_INPUT message to hwnd for every keyboard event, even when one of our
+// windows is not in the foreground (RIDEV_INPUTSINK). Unlike a low-level hook, Windows does not
+// wait for us to process these: they are only observed, never blocked or delayed.
+// RegisterHotKey cannot be used because it does not support a modifier-only combination.
+bool register_raw_keyboard_input(HWND hwnd) {
+  RAWINPUTDEVICE device = {};
+  device.usUsagePage = 0x01; // HID_USAGE_PAGE_GENERIC
+  device.usUsage = 0x06;     // HID_USAGE_GENERIC_KEYBOARD
+  device.dwFlags = RIDEV_INPUTSINK;
+  device.hwndTarget = hwnd;
+  return RegisterRawInputDevices(&device, 1, sizeof(device)) != FALSE;
+}
+
+void unregister_raw_keyboard_input() {
+  RAWINPUTDEVICE device = {};
+  device.usUsagePage = 0x01;
+  device.usUsage = 0x06;
+  device.dwFlags = RIDEV_REMOVE;
+  device.hwndTarget = nullptr; // Must be null with RIDEV_REMOVE
+  RegisterRawInputDevices(&device, 1, sizeof(device));
+}
+
+// Handles one WM_INPUT message. Starts recording when Left Ctrl + Left Win go down.
+void on_raw_input(HRAWINPUT input_handle) {
+  RAWINPUT input;
+  UINT size = sizeof(input);
+  if (GetRawInputData(input_handle, RID_INPUT, &input, &size, sizeof(RAWINPUTHEADER)) ==
+        static_cast<UINT>(-1) ||
+      input.header.dwType != RIM_TYPEKEYBOARD) {
+    return;
+  }
+
+  // Input sent by SendInput has no device handle. Ignore it, including the Ctrl+V the worker
+  // sends when pasting.
+  if (input.header.hDevice == nullptr) {
+    return;
+  }
+
+  const RAWKEYBOARD& key = input.data.keyboard;
+  if ((key.Flags & RI_KEY_BREAK) != 0) {
+    return; // Key-up. Releases are detected by polling (see start_recording).
+  }
+
+  // Raw input reports both Ctrl keys as VK_CONTROL; the E0 prefix marks the right one.
+  UINT virtual_key = key.VKey;
+  if (virtual_key == VK_CONTROL) {
+    virtual_key = (key.Flags & RI_KEY_E0) != 0 ? VK_RCONTROL : VK_LCONTROL;
+  }
+
+  // Windows has normally updated the key state by the time we read WM_INPUT, but only the key
+  // pressed earlier is checked, so this does not depend on that timing.
+  const bool hotkey_pressed = (virtual_key == VK_LCONTROL && is_key_down(VK_LWIN)) ||
+                              (virtual_key == VK_LWIN && is_key_down(VK_LCONTROL));
+  if (hotkey_pressed) {
+    start_recording();
+  }
+}
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM w_param, LPARAM l_param) {
   // Explorer was restarted and the notification area is empty again
   if (msg == g_app.taskbar_created_msg && msg != 0) {
@@ -244,9 +281,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM w_param, LPARAM l_param
   }
 
   switch (msg) {
-  case WM_APP_HOTKEY_PRESSED:
-    start_recording();
-    return 0;
+  case WM_INPUT:
+    on_raw_input(reinterpret_cast<HRAWINPUT>(l_param));
+    break; // DefWindowProc must still see WM_INPUT so Windows can free the input data
 
   case WM_TIMER:
     if (w_param == TIMER_ID_RELEASE_POLL && !is_hotkey_held()) {
@@ -283,6 +320,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM w_param, LPARAM l_param
     return 0;
 
   case WM_DESTROY:
+    unregister_raw_keyboard_input();
     if (g_app.recorder.is_recording) {
       KillTimer(hwnd, TIMER_ID_RELEASE_POLL);
       g_app.recorder.is_recording = false; // Drop the recording in progress
@@ -301,7 +339,7 @@ void show_error(const std::wstring& message) {
 }
 
 int run(HINSTANCE instance) {
-  // Only one instance may run: two keyboard hooks would record and paste everything twice.
+  // Only one instance may run: two instances would record and paste everything twice.
   HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, L"Local\\cwispr-single-instance");
   if (instance_mutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
     MessageBoxW(nullptr, L"cwispr is already running. Look for its icon in the notification area.",
@@ -343,11 +381,10 @@ int run(HINSTANCE instance) {
   g_app.tray = std::make_unique<TrayIcon>(g_app.hwnd, WM_APP_TRAY);
   g_app.tray->add();
 
-  // Install the hotkey hook. It must be installed by the thread that runs the message loop.
-  g_app.keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_hook_proc, instance, 0);
-  if (g_app.keyboard_hook == nullptr) {
-    GlobalLog->error("main", "Failed to install the keyboard hook.");
-    show_error(L"Failed to install the keyboard hook.");
+  // Start receiving keyboard input for the hotkey.
+  if (!register_raw_keyboard_input(g_app.hwnd)) {
+    GlobalLog->error("main", "Failed to register for raw keyboard input.");
+    show_error(L"Failed to register for keyboard input.");
     DestroyWindow(g_app.hwnd);
     return -1;
   }
@@ -365,7 +402,6 @@ int run(HINSTANCE instance) {
   if (ma_device_init(nullptr, &config, &g_app.device) != MA_SUCCESS) {
     GlobalLog->error("main", "Failed to init recording device.");
     show_error(L"Failed to initialize the microphone.");
-    UnhookWindowsHookEx(g_app.keyboard_hook);
     DestroyWindow(g_app.hwnd);
     return -1;
   }
@@ -379,7 +415,6 @@ int run(HINSTANCE instance) {
     GlobalLog->error("main", "Failed to start recording device after initialization.");
     show_error(L"Failed to start the microphone.");
     ma_device_uninit(&g_app.device);
-    UnhookWindowsHookEx(g_app.keyboard_hook);
     DestroyWindow(g_app.hwnd);
     return -1;
   }
@@ -410,10 +445,8 @@ int run(HINSTANCE instance) {
   }
 
   // 5. --- SHUTDOWN ---
-  // The window is destroyed and the tray icon removed (WM_DESTROY).
+  // The window is destroyed, raw input unregistered and the tray icon removed (WM_DESTROY).
   GlobalLog->info("main", "Message loop exited.");
-
-  UnhookWindowsHookEx(g_app.keyboard_hook);
 
   ma_device_uninit(&g_app.device);
   GlobalLog->info("main", "Uninitialized recording device.");
