@@ -3,7 +3,7 @@ Done:
 - Synchronized the miniaudio data callback and the recording buffer with a mutex.
 - Transcriptions are saved to %LOCALAPPDATA%\cwispr\transcripts and the last one can be copied
   from the tray menu.
-- Ctrl + Alt + V pastes the last transcription again.
+- Alt + Shift + Z pastes the last transcription again.
 
 Next:
 1. Make the transcription model configurable instead of changing it in worker.cpp.

@@ -31,10 +31,10 @@ constexpr UINT_PTR TIMER_ID_RELEASE_POLL = 1;
 constexpr UINT_PTR TIMER_ID_REPASTE_RELEASE_POLL = 2;
 constexpr UINT RELEASE_POLL_INTERVAL_MS = 20;
 
-// Re-paste hotkey: Ctrl + Alt + V pastes the last transcription again.
+// Re-paste hotkey: Alt + Shift + Z pastes the last transcription again.
 constexpr int HOTKEY_ID_REPASTE = 1;
-constexpr UINT REPASTE_HOTKEY_MODIFIERS = MOD_CONTROL | MOD_ALT;
-constexpr UINT REPASTE_HOTKEY_KEY = 'V';
+constexpr UINT REPASTE_HOTKEY_MODIFIERS = MOD_ALT | MOD_SHIFT;
+constexpr UINT REPASTE_HOTKEY_KEY = 'Z';
 
 constexpr double MINIMUM_RECORDING_SECONDS = 1.5;
 
@@ -178,8 +178,8 @@ void on_transcript_done(TranscriptStatus status) {
 }
 
 // Called when the re-paste hotkey goes down. The paste is only queued once the hotkey keys are
-// released (see TIMER_ID_REPASTE_RELEASE_POLL): a Ctrl+V sent while Alt is still held would
-// arrive as Ctrl+Alt+V.
+// released (see TIMER_ID_REPASTE_RELEASE_POLL): a Ctrl+V sent while Alt and Shift are still held
+// would arrive as Ctrl+Alt+Shift+V.
 void on_repaste_hotkey() {
   if (g_app.repaste_pending || g_app.recorder.is_recording) {
     return;
@@ -194,7 +194,7 @@ void on_repaste_hotkey() {
 }
 
 bool is_repaste_hotkey_held() {
-  return is_key_down(VK_CONTROL) || is_key_down(VK_MENU) || is_key_down(REPASTE_HOTKEY_KEY);
+  return is_key_down(VK_MENU) || is_key_down(VK_SHIFT) || is_key_down(REPASTE_HOTKEY_KEY);
 }
 
 void queue_repaste() {
@@ -455,14 +455,14 @@ int run(HINSTANCE instance) {
   }
 
   // The re-paste hotkey is an ordinary modifier + key combination, so RegisterHotKey works for it.
-  // Unlike raw input it also swallows the keystroke, so the focused app never sees Ctrl+Alt+V.
+  // Unlike raw input it also swallows the keystroke, so the focused app never sees Alt+Shift+Z.
   // Not fatal: dictation still works without it.
   if (!RegisterHotKey(g_app.hwnd, HOTKEY_ID_REPASTE, REPASTE_HOTKEY_MODIFIERS | MOD_NOREPEAT,
                       REPASTE_HOTKEY_KEY)) {
-    GlobalLog->warn("main", "Failed to register the Ctrl + Alt + V re-paste hotkey, another app "
+    GlobalLog->warn("main", "Failed to register the Alt + Shift + Z re-paste hotkey, another app "
                             "may already use it.");
     g_app.tray->notify(L"cwispr: re-paste hotkey unavailable",
-                       L"Ctrl + Alt + V is already used by another app. Use \"Copy last "
+                       L"Alt + Shift + Z is already used by another app. Use \"Copy last "
                        L"transcription\" in the tray menu instead.",
                        true);
   }
