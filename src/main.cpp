@@ -25,9 +25,16 @@ namespace {
 // Messages sent to the hidden window.
 constexpr UINT WM_APP_TRAY = WM_APP + 1;            // Mouse events on the tray icon
 constexpr UINT WM_APP_TRANSCRIPT_DONE = WM_APP + 2; // Posted by the worker, wParam = status
+constexpr UINT WM_APP_REPASTE_DONE = WM_APP + 3;    // Posted by the worker, wParam = pasted
 
 constexpr UINT_PTR TIMER_ID_RELEASE_POLL = 1;
+constexpr UINT_PTR TIMER_ID_REPASTE_RELEASE_POLL = 2;
 constexpr UINT RELEASE_POLL_INTERVAL_MS = 20;
+
+// Re-paste hotkey: Ctrl + Alt + V pastes the last transcription again.
+constexpr int HOTKEY_ID_REPASTE = 1;
+constexpr UINT REPASTE_HOTKEY_MODIFIERS = MOD_CONTROL | MOD_ALT;
+constexpr UINT REPASTE_HOTKEY_KEY = 'V';
 
 constexpr double MINIMUM_RECORDING_SECONDS = 1.5;
 
@@ -49,7 +56,8 @@ struct App {
   QueueContext queue;        // Shared with the worker thread
   TranscriptLog* transcripts = nullptr;
   std::unique_ptr<TrayIcon> tray;
-  int pending_jobs = 0; // Recordings handed to the worker that have not reported back yet
+  int pending_jobs = 0;         // Recordings handed to the worker that have not reported back yet
+  bool repaste_pending = false; // Re-paste hotkey pressed, waiting for its keys to be released
 };
 
 App g_app;
@@ -166,6 +174,49 @@ void on_transcript_done(TranscriptStatus status) {
   case TranscriptStatus::Pasted:
   case TranscriptStatus::Empty:
     break;
+  }
+}
+
+// Called when the re-paste hotkey goes down. The paste is only queued once the hotkey keys are
+// released (see TIMER_ID_REPASTE_RELEASE_POLL): a Ctrl+V sent while Alt is still held would
+// arrive as Ctrl+Alt+V.
+void on_repaste_hotkey() {
+  if (g_app.repaste_pending || g_app.recorder.is_recording) {
+    return;
+  }
+  if (g_app.transcripts->last_text().empty()) {
+    g_app.tray->notify(L"cwispr", L"There is no transcription to paste again yet.", false);
+    return;
+  }
+  g_app.repaste_pending = true;
+  SetTimer(g_app.hwnd, TIMER_ID_REPASTE_RELEASE_POLL, RELEASE_POLL_INTERVAL_MS, nullptr);
+  GlobalLog->info("main", "Re-paste hotkey pressed, waiting for it to be released.");
+}
+
+bool is_repaste_hotkey_held() {
+  return is_key_down(VK_CONTROL) || is_key_down(VK_MENU) || is_key_down(REPASTE_HOTKEY_KEY);
+}
+
+void queue_repaste() {
+  KillTimer(g_app.hwnd, TIMER_ID_REPASTE_RELEASE_POLL);
+  g_app.repaste_pending = false;
+
+  std::string text = g_app.transcripts->last_text();
+  if (text.empty()) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_app.queue.queue_mutex);
+    g_app.queue.paste_queue.push(std::move(text));
+  }
+  g_app.queue.cv.notify_one();
+  GlobalLog->info("main", "Queued the last transcription to be pasted again.");
+}
+
+void on_repaste_done(bool pasted) {
+  if (!pasted) {
+    g_app.tray->notify(L"cwispr: paste failed",
+                       L"Use \"Copy last transcription\" in the tray menu to get the text.", true);
   }
 }
 
@@ -288,7 +339,19 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM w_param, LPARAM l_param
   case WM_TIMER:
     if (w_param == TIMER_ID_RELEASE_POLL && !is_hotkey_held()) {
       stop_recording();
+    } else if (w_param == TIMER_ID_REPASTE_RELEASE_POLL && !is_repaste_hotkey_held()) {
+      queue_repaste();
     }
+    return 0;
+
+  case WM_HOTKEY:
+    if (w_param == HOTKEY_ID_REPASTE) {
+      on_repaste_hotkey();
+    }
+    return 0;
+
+  case WM_APP_REPASTE_DONE:
+    on_repaste_done(w_param != 0);
     return 0;
 
   case WM_APP_TRANSCRIPT_DONE:
@@ -321,6 +384,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM w_param, LPARAM l_param
 
   case WM_DESTROY:
     unregister_raw_keyboard_input();
+    UnregisterHotKey(hwnd, HOTKEY_ID_REPASTE);
+    KillTimer(hwnd, TIMER_ID_REPASTE_RELEASE_POLL);
     if (g_app.recorder.is_recording) {
       KillTimer(hwnd, TIMER_ID_RELEASE_POLL);
       g_app.recorder.is_recording = false; // Drop the recording in progress
@@ -389,6 +454,19 @@ int run(HINSTANCE instance) {
     return -1;
   }
 
+  // The re-paste hotkey is an ordinary modifier + key combination, so RegisterHotKey works for it.
+  // Unlike raw input it also swallows the keystroke, so the focused app never sees Ctrl+Alt+V.
+  // Not fatal: dictation still works without it.
+  if (!RegisterHotKey(g_app.hwnd, HOTKEY_ID_REPASTE, REPASTE_HOTKEY_MODIFIERS | MOD_NOREPEAT,
+                      REPASTE_HOTKEY_KEY)) {
+    GlobalLog->warn("main", "Failed to register the Ctrl + Alt + V re-paste hotkey, another app "
+                            "may already use it.");
+    g_app.tray->notify(L"cwispr: re-paste hotkey unavailable",
+                       L"Ctrl + Alt + V is already used by another app. Use \"Copy last "
+                       L"transcription\" in the tray menu instead.",
+                       true);
+  }
+
   // 3. --- MINIAUDIO & THREAD INITIALIZATION ---
   // Initialize the recorder device config
   ma_device_config config = ma_device_config_init(ma_device_type_capture);
@@ -421,11 +499,12 @@ int run(HINSTANCE instance) {
 
   // Spawn transcription thread. It reports each finished recording back to the UI thread.
   const HWND hwnd = g_app.hwnd;
-  std::thread transcription_thread(process_audio_queue, std::ref(g_app.queue),
-                                   std::ref(transcripts), [hwnd](TranscriptStatus status) {
-                                     PostMessageW(hwnd, WM_APP_TRANSCRIPT_DONE,
-                                                  static_cast<WPARAM>(status), 0);
-                                   });
+  std::thread transcription_thread(
+    process_audio_queue, std::ref(g_app.queue), std::ref(transcripts),
+    [hwnd](TranscriptStatus status) {
+      PostMessageW(hwnd, WM_APP_TRANSCRIPT_DONE, static_cast<WPARAM>(status), 0);
+    },
+    [hwnd](bool pasted) { PostMessageW(hwnd, WM_APP_REPASTE_DONE, pasted ? 1 : 0, 0); });
 
   if (getEnvVariable(L"GROQ_API_KEY").empty()) {
     g_app.tray->notify(L"cwispr: GROQ_API_KEY is not set",

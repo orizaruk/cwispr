@@ -21,6 +21,7 @@ Run `cwispr.exe`. No window opens; a small dot appears in the notification area 
 
 - Hold `Left Ctrl + Left Win` to record. Recordings shorter than 1.5 seconds are discarded.
 - Release the keys to send the recorded audio for transcription.
+- Press `Ctrl + Alt + V` to paste the last transcription again, for example when the first paste did not land. The paste happens once the keys are released. Only transcriptions from the current run are available; after a restart, copy older ones from the transcript history.
 - Click the tray icon (left or right click) for the menu:
   - **Copy last transcription** - puts the most recent transcription on the clipboard.
   - **Open transcripts folder**
@@ -40,6 +41,8 @@ A Windows notification is shown when a paste or a transcription request fails, a
 Only one instance can run at a time.
 
 The app uses the default capture device selected by Windows.
+
+The re-paste hotkey is registered with `RegisterHotKey`, so the key press is not passed on to the focused app. If another app already uses `Ctrl + Alt + V`, cwispr shows a notification at startup and the hotkey is unavailable; dictation still works.
 
 The hotkey press is detected with Raw Input (`WM_INPUT` messages), which only observes the keyboard and never delays it; the release is detected by polling the key state while recording. Like the paste itself, the hotkey may not work while an elevated (administrator) window has focus, unless cwispr is also run as administrator.
 

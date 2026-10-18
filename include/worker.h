@@ -16,8 +16,12 @@
 // transcript log.
 using WorkerNotify = std::function<void(TranscriptStatus)>;
 
-void process_audio_queue(QueueContext& q_context, TranscriptLog& transcripts,
-                         WorkerNotify notify);
+// Called on the worker thread after a text from the paste queue was pasted, with the result of
+// paste_text.
+using RepasteNotify = std::function<void(bool pasted)>;
+
+void process_audio_queue(QueueContext& q_context, TranscriptLog& transcripts, WorkerNotify notify,
+                         RepasteNotify repaste_notify);
 
 // Replaces the clipboard contents with in_text. hwnd becomes the clipboard owner.
 bool modify_clipboard(HWND hwnd, std::wstring& in_text);

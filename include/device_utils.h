@@ -18,6 +18,9 @@ struct RecordingContext {
 
 struct QueueContext {
     std::queue<std::vector<int16_t>> buffer_queue;
+    // UTF-8 texts to paste again (the re-paste hotkey). Handled by the worker so every paste,
+    // and the clipboard backup/restore around it, happens on one thread.
+    std::queue<std::string> paste_queue;
     std::mutex queue_mutex;
     std::condition_variable cv;
     bool need_to_exit{false};

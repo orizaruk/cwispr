@@ -279,7 +279,8 @@ bool paste_text(const std::string& text_to_paste) {
   return true;
 }
 
-void process_audio_queue(QueueContext& q_context, TranscriptLog& transcripts, WorkerNotify notify) {
+void process_audio_queue(QueueContext& q_context, TranscriptLog& transcripts, WorkerNotify notify,
+                         RepasteNotify repaste_notify) {
   GlobalLog->info("worker", "Worker launched, waiting for audio.");
   std::string model_name = "whisper-large-v3";
 
@@ -288,23 +289,38 @@ void process_audio_queue(QueueContext& q_context, TranscriptLog& transcripts, Wo
 
   while (true) {
     std::vector<int16_t> local_audio;
+    std::string repaste_text;
 
     {
       // Wait on the conditional variable for signal from main thread
       std::unique_lock<std::mutex> lock(q_context.queue_mutex);
       q_context.cv.wait(lock, [&q_context]() {
-        return !q_context.buffer_queue.empty() || q_context.need_to_exit;
+        return !q_context.buffer_queue.empty() || !q_context.paste_queue.empty() ||
+               q_context.need_to_exit;
       }); // Wake up and take lock
 
-      // If queue is empty and need to quit, shut down thread
-      if (q_context.need_to_exit && q_context.buffer_queue.empty()) {
+      if (!q_context.paste_queue.empty()) {
+        // Re-pastes go first: they are quick and the user is waiting on them
+        repaste_text = std::move(q_context.paste_queue.front());
+        q_context.paste_queue.pop();
+      } else if (q_context.need_to_exit && q_context.buffer_queue.empty()) {
+        // If queue is empty and need to quit, shut down thread
         return;
+      } else {
+        // Otherwise, process the buffer until it is empty
+        local_audio = std::move(q_context.buffer_queue.front());
+        // Move the vector out of the queue into the local vector
+        q_context.buffer_queue.pop(); // Now delete the empty vector from the queue
       }
+    }
 
-      // Otherwise, process the buffer until it is empty
-      local_audio = std::move(q_context.buffer_queue.front());
-      // Move the vector out of the queue into the local vector
-      q_context.buffer_queue.pop(); // Now delete the empty vector from the queue
+    if (!repaste_text.empty()) {
+      GlobalLog->info("worker", "Re-pasting the last transcription.");
+      const bool pasted = paste_text(repaste_text);
+      if (repaste_notify) {
+        repaste_notify(pasted);
+      }
+      continue;
     }
 
     GlobalLog->info(
