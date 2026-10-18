@@ -115,7 +115,7 @@ bool backup_clipboard_text(HWND hwnd, std::wstring& out_text) {
   GlobalUnlock(hClipboardData);
   CloseClipboard();
   GlobalLog->info("clipboard_backup",
-                  "Succesfully saved clipboard contents for back up, returning true.");
+                  "Successfully saved clipboard contents for back up, returning true.");
   return true;
 }
 
@@ -172,7 +172,7 @@ bool modify_clipboard(HWND hwnd, std::wstring& in_text) {
 
   CloseClipboard();
   GlobalLog->info("clipboard_modify",
-                  "Succesfully replaced clipboard contents with transcribed text.");
+                  "Successfully replaced clipboard contents.");
   return true;
 }
 
@@ -253,6 +253,7 @@ bool paste_text(const std::string& text_to_paste) {
     GlobalLog->error("paste_text", "Failed to modify contents of clipboard.");
     return false;
   }
+  GlobalLog->info("paste_text", "Set clipboard to the transcription text.");
 
   // 3. Simulate Ctrl+V in order to paste clipboard contents
   if (!simulate_paste_keypress()) {
@@ -268,6 +269,8 @@ bool paste_text(const std::string& text_to_paste) {
   if (clipboard_needs_restore_after_paste) {
     if (!modify_clipboard(hwnd, saved_clipboard_text)) {
       GlobalLog->error("paste_text", "Failed to restore contents of clipboard.");
+    } else {
+      GlobalLog->info("paste_text", "Restored the previous clipboard contents.");
     }
   }
 
@@ -334,7 +337,7 @@ void process_audio_queue(QueueContext& q_context, TranscriptLog& transcripts, Wo
     std::memcpy(memory_file.data(), &header, sizeof(WavHeader)); // Copy the header
     std::memcpy(memory_file.data() + sizeof(WavHeader), local_audio.data(), data_byte_size);
 
-    GlobalLog->info("worker", ".WAV file created succesfully.");
+    GlobalLog->info("worker", ".WAV file created successfully.");
 
     // For testing: Saving the 'in-memory' file to disk to validate file created correctly
     // save_memory_to_disk(memory_file, "test.wav");
